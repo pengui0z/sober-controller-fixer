@@ -46,6 +46,23 @@ SDL_INIT_EVENTS = 0x00004000
 SDL_INIT_JOYSTICK = 0x00000200
 SDL_INIT_GAMECONTROLLER = 0x00002000
 
+# Connection bus stored in the first two bytes (little-endian) of an SDL GUID.
+# Values mirror the Linux input bus types SDL reports for evdev devices.
+BUS_NAMES = {
+    0x01: "PCI",
+    0x02: "ISA-PnP",
+    0x03: "USB",
+    0x04: "HIL",
+    0x05: "Bluetooth",
+    0x06: "Virtual",
+    0x10: "ISA",
+    0x11: "PS/2",
+    0x13: "Serial",
+    0x14: "Gameport",
+    0x18: "I2C",
+    0x1C: "SPI",
+}
+
 HAT_DIRECTIONS = {
     0: "released",
     0x01: "up",
@@ -419,6 +436,11 @@ class ControllerInfo:
             return "%04x:%04x" % (self.vid, self.pid)
         return "----:----"
 
+    @property
+    def connection(self):
+        """Connection bus name (USB, Bluetooth, ...) parsed from the SDL GUID."""
+        return bus_name(guid_bus(self.guid))
+
 
 def _script_dir():
     return Path(__file__).resolve().parent
@@ -474,6 +496,78 @@ def mapping_name(mapping_line):
         return mapping_line.split(",", 2)[1]
     except IndexError:
         return mapping_line.split(",", 1)[0]
+
+
+def _guid_bytes(guid):
+    """Decode a 32-hex-char SDL GUID into its raw 16 bytes, or None if invalid."""
+    if not guid or len(guid) != 32:
+        return None
+    try:
+        raw = bytes.fromhex(guid)
+    except ValueError:
+        return None
+    return raw if len(raw) == 16 else None
+
+
+def guid_bus(guid):
+    """Connection bus id from an SDL GUID (little-endian first two bytes)."""
+    raw = _guid_bytes(guid)
+    return raw[0] | (raw[1] << 8) if raw else None
+
+
+def bus_name(bus):
+    """Human-readable name for a connection bus id."""
+    if bus is None:
+        return "unknown"
+    return BUS_NAMES.get(bus, "bus 0x%02x" % bus)
+
+
+def guid_vendor_product(guid):
+    """(vendor, product) identity of an SDL GUID, independent of connection bus.
+
+    SDL lays the GUID out as bus, crc, vendor, 0, product, 0, version, 0 (16-bit
+    little-endian fields). Vendor and product stay the same whether a controller
+    is attached over USB or Bluetooth, so they identify "the same device".
+    """
+    raw = _guid_bytes(guid)
+    if not raw:
+        return None
+    vendor = raw[4] | (raw[5] << 8)
+    product = raw[8] | (raw[9] << 8)
+    return vendor, product
+
+
+def rewrite_mapping_guid(mapping_line, guid):
+    """Return a mapping line re-keyed to a different GUID, keeping the bindings."""
+    if not mapping_line or not guid:
+        return mapping_line
+    parts = mapping_line.split(",", 1)
+    if len(parts) < 2:
+        return mapping_line
+    return guid + "," + parts[1]
+
+
+def mapping_for_device(mapping_db, guid):
+    """Resolve a known fix for a device, matching across connection buses.
+
+    Returns ``(mapping_line, exact, source_bus)``. An exact GUID match is
+    returned as-is. Otherwise, if another entry shares the same vendor:product
+    (for example the USB fix for a controller that is now connected over
+    Bluetooth), the bindings are re-keyed to this device's own GUID and ``exact``
+    is False; ``source_bus`` is the connection bus of the matched entry.
+    """
+    if not guid:
+        return None, False, None
+    exact = mapping_db.get(guid.lower())
+    if exact:
+        return exact, True, guid_bus(guid)
+    identity = guid_vendor_product(guid)
+    if not identity or not any(identity):
+        return None, False, None
+    for entry_guid, line in mapping_db.items():
+        if guid_vendor_product(entry_guid) == identity:
+            return rewrite_mapping_guid(line, guid), False, guid_bus(entry_guid)
+    return None, False, None
 
 
 def save_user_mapping(line):
@@ -817,14 +911,15 @@ class FixerApp:
         label = self._Gtk.Label(label="Connected controllers", halign=self._Gtk.Align.START)
         self.left.pack_start(label, False, False, 0)
 
-        self.device_store = self._Gtk.ListStore(str, str, str, str, str, int)
+        self.device_store = self._Gtk.ListStore(str, str, str, str, str, str, int)
         self.device_tree = self._Gtk.TreeView(model=self.device_store)
         for title, col in (
             ("Name", 0),
             ("VID:PID", 1),
-            ("GUID", 2),
-            ("Status", 3),
-            ("SDL mapping", 4),
+            ("Connection", 2),
+            ("GUID", 3),
+            ("Status", 4),
+            ("SDL mapping", 5),
         ):
             renderer = self._Gtk.CellRendererText()
             renderer.set_property("ellipsize-set", True)
@@ -858,13 +953,14 @@ class FixerApp:
 
         self.d_name = add_row(0, "Name:")
         self.d_ids = add_row(1, "IDs:")
-        self.d_guid = add_row(2, "SDL GUID:")
-        self.d_status = add_row(3, "Status:")
-        self.d_known = add_row(4, "Known fix:")
-        add_row(5, "Active SDL mapping:")
+        self.d_conn = add_row(2, "Connection:")
+        self.d_guid = add_row(3, "SDL GUID:")
+        self.d_status = add_row(4, "Status:")
+        self.d_known = add_row(5, "Known fix:")
+        add_row(6, "Active SDL mapping:")
         self.mapping_label = self._Gtk.Label(label="", halign=self._Gtk.Align.START, selectable=True, wrap=True)
         self.mapping_label.get_style_context().add_class("mono")
-        grid.attach(self.mapping_label, 1, 5, 1, 1)
+        grid.attach(self.mapping_label, 1, 6, 1, 1)
 
         expander.add(grid)
         self.left.pack_start(expander, False, False, 0)
@@ -1037,14 +1133,18 @@ class FixerApp:
         self.device_store.clear()
         self.wizard_device.remove_all()
         for dev in self.devices:
-            known = mapping_for_guid(self.mapping_db, dev.guid)
-            if known:
+            mapping, exact, source_bus = mapping_for_device(self.mapping_db, dev.guid)
+            if mapping and exact:
                 badge = "KNOWN FIX"
+            elif mapping:
+                badge = "KNOWN FIX (%s)" % bus_name(source_bus)
             elif dev.mapping:
                 badge = "mapped"
             else:
                 badge = "unmapped"
-            self.device_store.append([dev.name, dev.ids, dev.guid or "-", badge, dev.mapping or "-", dev.index])
+            self.device_store.append(
+                [dev.name, dev.ids, dev.connection, dev.guid or "-", badge, dev.mapping or "-", dev.index]
+            )
             self.wizard_device.append_text(dev.name)
         if self.devices:
             self.device_tree.get_selection().select_path(0)
@@ -1060,25 +1160,32 @@ class FixerApp:
         model, treeiter = selection.get_selected()
         if treeiter is None:
             return
-        dev = next((d for d in self.devices if d.index == model[treeiter][5]), None)
+        dev = next((d for d in self.devices if d.index == model[treeiter][6]), None)
         if not dev:
             return
         self.selected = dev
-        known = mapping_for_guid(self.mapping_db, dev.guid)
+        mapping, exact, source_bus = mapping_for_device(self.mapping_db, dev.guid)
         self.d_name.set_text(dev.name)
         self.d_ids.set_text(dev.ids)
+        self.d_conn.set_text(dev.connection)
         self.d_guid.set_text(dev.guid or "-")
         self.d_status.set_text("SDL mapping active" if dev.mapping else "unmapped (raw joystick)")
-        self.d_known.set_text(mapping_name(known) if known else "none bundled")
+        if mapping and exact:
+            self.d_known.set_text("%s (exact match)" % mapping_name(mapping))
+        elif mapping:
+            self.d_known.set_text("%s (via %s variant; GUID re-keyed)" % (mapping_name(mapping), bus_name(source_bus)))
+        else:
+            self.d_known.set_text("none bundled")
         self.mapping_label.set_text(dev.mapping or "(no mapping)")
-        self.apply_btn.set_sensitive(bool(known))
+        self.apply_btn.set_sensitive(bool(mapping))
         self.copy_btn.set_sensitive(bool(dev.mapping))
-        self.set_status("%s  [%s]  %s" % (dev.name, dev.ids, "known fix available" if known else "no bundled fix"))
+        self.set_status("%s  [%s]  %s" % (dev.name, dev.ids, "known fix available" if mapping else "no bundled fix"))
 
     def _selected_mapping(self):
         if not self.selected:
             return None
-        return mapping_for_guid(self.mapping_db, self.selected.guid)
+        mapping, _exact, _src = mapping_for_device(self.mapping_db, self.selected.guid)
+        return mapping
 
     # ---- tester ----------------------------------------------------------
 
@@ -1502,20 +1609,26 @@ def cli_debug():
     devices = enumerate_devices()
     print("controllers found: %d" % len(devices))
     for dev in devices:
-        known = mapping_for_guid(db, dev.guid)
+        mapping, exact, source_bus = mapping_for_device(db, dev.guid)
         print("- %s" % dev.name)
         print("    ids:      %s" % dev.ids)
+        print("    conn:     %s" % dev.connection)
         print("    guid:     %s" % (dev.guid or "-"))
         print("    mapped:   %s" % ("yes" if dev.mapping else "no"))
-        if known:
-            print("    known fix: yes (%s)" % mapping_name(known))
+        if mapping and exact:
+            print("    known fix: yes (%s, exact match)" % mapping_name(mapping))
+        elif mapping:
+            print(
+                "    known fix: yes (%s, via %s variant, re-keyed)"
+                % (mapping_name(mapping), bus_name(source_bus))
+            )
         else:
             print("    known fix: no")
     if devices:
         dev = devices[0]
-        known = mapping_for_guid(db, dev.guid)
-        if known:
-            rc = SDL.add_mapping(known)
+        mapping, _exact, _src = mapping_for_device(db, dev.guid)
+        if mapping:
+            rc = SDL.add_mapping(mapping)
             print(
                 "add mapping for GUID %s -> SDL returned %d (1=added, 0=updated, -1=parse error)"
                 % (dev.guid, rc)

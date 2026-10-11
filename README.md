@@ -13,7 +13,8 @@ and applies a one-click flatpak sandbox override so Sober sees a correct mapping
 ## Features
 
 - **Controller detection** – lists every SDL-visible joystick with its name,
-  vendor/product ID, 32-char SDL GUID, and whether a mapping is active.
+  vendor/product ID, connection type (USB, Bluetooth, ...), 32-char SDL GUID,
+  and whether a mapping is active.
 - **Live button/axis tester** – opens the raw joystick and shows which `b`/`a`/`h`
   index each physical control reports (no need to disassemble layouts by hand).
 - **Mapping wizard** – builds a correct SDL mapping for *any* controller by
@@ -22,6 +23,10 @@ and applies a one-click flatpak sandbox override so Sober sees a correct mapping
   The finished line can be saved to your personal DB, applied to Sober, or copied.
 - **Known-fix database** – bundled (and user-extendable) SDL gamecontrollerdb
   lines keyed by GUID; matching devices get an "Apply fix" button.
+- **Bluetooth support** – wireless controllers are detected the same as wired
+  ones. If only a USB variant of your pad is in the database, the fix is matched
+  by vendor/product and re-keyed to the Bluetooth GUID automatically, so the
+  same one-click apply works over Bluetooth (and vice versa).
 - **One-click Sober integration** – applies the exact same fix that worked on a
   real machine:
   1. `flatpak override --user --device=input org.vinegarhq.Sober`
@@ -55,7 +60,9 @@ python3 sober_controller_fixer.py --debug  # headless controller listing
 ```
 
 1. Select your controller in the list. A "KNOWN FIX" status means a bundled
-   mapping exists for it.
+   mapping exists for it. If it was matched across connection types (e.g. a
+   Bluetooth pad using the USB fix), the status shows where it came from, e.g.
+   "KNOWN FIX (USB)".
 2. (Optional) hit **Start testing** and press every button / move every axis;
    the lit `b`/`a` indices are what SDL currently reports.
 3. Click **Apply fix for selected controller**.
@@ -143,6 +150,11 @@ Sober runs sandboxed by flatpak. Two things block controllers:
   first 8 bytes plus the product/version getters, because returning a 16-byte
   struct by value is unreliable through `ctypes` on x86-64 (SSE-register ABI).
   Layout was verified against the known-good GUID `03008d8dd620000014a7000011010000`.
+- The first two GUID bytes (little-endian) encode the connection bus (0x03 USB,
+  0x05 Bluetooth, ...). A pad connected over Bluetooth therefore has a different
+  GUID than the same pad on USB; the known-fix lookup falls back to
+  vendor:product matching so one entry covers both, applying under the device's
+  own GUID.
 - `--device=input` is intentionally left in place by Revert.
 
 ## Debugging
@@ -154,10 +166,14 @@ mapping DB entries: 1
 controllers found: 1
 - BDA NSW Spectra Wired Controller
     ids:      20d6:a714
+    conn:     USB
     guid:     03008d8dd620000014a7000011010000
     mapped:   yes
     known fix: yes (Bensussen Deutsch & Associates NSW Spectra Wired Controller)
 ```
+
+The same pad over Bluetooth reports `conn: Bluetooth` with a `0500...` GUID and
+shows `known fix: yes (<name>, via USB variant, re-keyed)`.
 
 ## Disclaimer
 
