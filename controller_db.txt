@@ -1,0 +1,11 @@
+# Sober Controller Fixer - known-good mappings
+# One SDL gamecontrollerdb-style line per controller. Rows preceded by '#' are comments.
+# To add a controller fix: put a line here (and/or in ~/.config/sober-controller-fixer/controller_db.txt)
+# with the exact SDL GUID of your device, e.g.:
+#   <32-hex-char-guid>,<name>,a:<binding>,b:<binding>,...,platform:Linux,
+# The app will then offer a one-click "Apply fix" for that device.
+#
+# Bensussen Deutsch & Associates (BDA) - NSW Spectra Wired Controller
+# USB 20d6:a714 - Linux shipped no usable mapping; SDL reports wrong button layout.
+# Gate buttons/triggers verified via raw joystick probing. dpad hat 0.
+03008d8dd620000014a7000011010000,Bensussen Deutsch & Associates NSW Spectra Wired Controller,a:b2,b:b1,x:b3,y:b0,back:b8,guide:b12,start:b9,leftstick:b10,rightstick:b11,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,platform:Linux,
