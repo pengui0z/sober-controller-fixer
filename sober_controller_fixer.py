@@ -689,6 +689,7 @@ class WizardSession:
     """
 
     AXIS_DEADZONE = 14000
+    AXIS_REST_BAND = 4000
     DPAD = FIELD_DPAD
     AXIS_STEP = FIELD_AXIS_STEP
     BUTTONISH = FIELD_BUTTONISH
@@ -703,6 +704,34 @@ class WizardSession:
         self.used_buttons = set()
         self.used_hats = set()
         self.used_axes = set()
+        self.neutral = {}
+        self._neutral_prev = {}
+
+    def _observe_axes(self, axes):
+        """Learn each axis's resting value (its "neutral").
+
+        Controllers can expose one-sided axes - notably Joy-Con ZL/ZR, which the
+        kernel/SDL report in a 0..255 (or 0..65535) range centered around 0, so a
+        released trigger rests at about +-16384 or +-32768 instead of 0. The wizard
+        must treat that rest point as neutral or every axis-based step is blocked.
+        """
+        for i, v in axes.items():
+            prev = self._neutral_prev.get(i)
+            n = self.neutral.get(i)
+            if n is None:
+                if prev is not None and prev == v:
+                    self.neutral[i] = v
+            elif abs(v - n) < self.AXIS_REST_BAND:
+                self.neutral[i] = (n * 3 + v) // 4
+            self._neutral_prev[i] = v
+
+    def adapted_axes(self, axes):
+        """Axes relative to their resting neutral (no side effects)."""
+        out = {}
+        for i, v in axes.items():
+            n = self.neutral.get(i)
+            out[i] = v - n if n is not None else 0
+        return out
 
     def current(self):
         if self.i < self.total:
@@ -735,6 +764,9 @@ class WizardSession:
         if field is None:
             return clues
         name = field
+
+        self._observe_axes(axes)
+        axes = self.adapted_axes(axes)
 
         if not self.armed:
             ready = False
@@ -1379,7 +1411,7 @@ class FixerApp:
         if live_buttons:
             live_parts.append("buttons: %s" % ", ".join("b%d" % i for i in live_buttons))
         live_axes = []
-        for i, v in axes.items():
+        for i, v in self.wizard_session.adapted_axes(axes).items():
             if abs(v) > self.wizard_session.AXIS_DEADZONE:
                 live_axes.append("a%d=%+d" % (i, int(v)))
         if live_axes:

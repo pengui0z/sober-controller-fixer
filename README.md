@@ -145,6 +145,12 @@ Sober runs sandboxed by flatpak. Two things block controllers:
 
 - The env override maps controllers inside the Sober sandbox only; the host SDL
   isn't affected.
+- Analog-trigger axes that rest away from center - notably Joy-Con ZL/ZR, which
+  the driver reports in a one-sided 0..255/0..65535 range so a released trigger
+  sits at roughly `+-16384`/`+-32768` - are auto-centered in the wizard: each
+  axis's resting neutral is learned and captures happen relative to it. Bonus
+  signal: without this, every stick/trigger step stays blocked on the "keep all
+  sticks released" arm check.
 - Changes take effect when Sober restarts.
 - The 32-char SDL GUID is reconstructed from `SDL_JoystickGetDeviceGUID`'s
   first 8 bytes plus the product/version getters, because returning a 16-byte
